@@ -1,4 +1,7 @@
-var survey = antrema_2024
+//////// On doit spliter les scripts pour uen bonne optimiation des serveurs//////////////////////////////
+//////// donc on tout simplement importer les images composites entre les dates /////////////////////////
+
+var survey = antrema_2024 // exemple comme parmi tant d'autres
 var geom = survey.geometry()
 var scale=10
 //print("allbands : ",final_bands.bandNames())
