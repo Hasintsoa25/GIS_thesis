@@ -1,0 +1,138 @@
+//===========================================================================================//
+// 
+//
+//
+
+//                      LOOPING FOR CLASSIFICATION SUING TIME SERIES                         
+//==========================================================================================//
+// Definir les années à traiter
+var annees = ["2017","2023"]
+// definir la geometrie de delimitation
+var delineation = ant_delim
+print(delineation.geometry().area(2).divide(10000))
+/*
+//  ===================  Function Masking=================================================//
+function maskS2clouds(image) {
+   var qa = image.select('QA60');
+
+  // Bits 10 and 11 are clouds and cirrus, respectively.
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+
+  return image.updateMask(mask).divide(10000);
+}
+
+// ============================== Function Bands maths ==========================================//
+
+// add variable in bands
+var inbands = ["B2","B3","B4","B8","B11"] 
+//Add spectral indices
+var allIndex = function (image){
+  var ndvi=image.normalizedDifference(["B8","B4"]).rename(["NDVI"])
+  var ndwi=image.normalizedDifference(["B8","B11"]).rename(["NDWI"])
+  var evi= image.expression(
+    '2.5 * ((NIR-RED) / (NIR + 6 * RED - 7.5* BLUE +1))',{
+    "NIR":image.select("B8").divide(10000),
+    "RED":image.select("B4").divide(10000),
+    "BLUE":image.select("B2").divide(10000)
+  }).rename(["EVI"])
+  var savi= image.expression("((NIR-ROUGE) / (NIR + ROUGE + 0.5))*(1 + 0.5)",{
+    "NIR":image.select("B8"),
+    "ROUGE":image.select("B4")
+  }).rename(["SAVI"])
+  var bsi = image.expression(
+  '((RED + SWIR) - (NIR + BLUE)) / ((RED + SWIR) + (NIR + BLUE)) ', 
+  {
+    'RED': image.select('B4'), 
+    'BLUE': image.select('B2'),
+    'NIR': image.select('B8'),
+    'SWIR': image.select('B11')
+
+  }
+)
+  .rename('BSI')
+  return image.addBands(ndvi).addBands(ndwi).addBands(evi)
+  .addBands(savi).addBands(bsi).copyProperties(image,['system:time_start']);
+          
+}
+
+
+for (var i =0; i < annees.length; i =i+1){
+   var year = annees[i]
+   var start = year + "-01-01"
+   var end = ee.Number.parse(year).add(2).format("%d").cat("-12-31")
+
+var ant = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+              .filterDate(start,end)
+              .filterBounds(delineation)
+              .filter(ee.Filter.lte("CLOUDY_PIXEL_PERCENTAGE",20))
+              .map(maskS2clouds)
+
+
+print("nombre d'images à traiter à l'année : " + year, ant.size())
+
+
+//Collection with all images also containing the indices
+var collection = ant.select(inbands).map(allIndex);
+
+// Define and calculate the median bands and the other index statistics
+var band_median = collection.select(inbands).median()
+var ndvimax = collection.select('NDVI').reduce(ee.Reducer.max()).rename("NDVI_MAX");
+var ndvimean = collection.select('NDVI').reduce(ee.Reducer.mean()).rename("NDVI");
+var savimax = collection.select('SAVI').reduce(ee.Reducer.max()).rename("SAVI_MAX");
+var savimean = collection.select('SAVI').reduce(ee.Reducer.mean()).rename("SAVI");
+var ndwimax = collection.select('NDWI').reduce(ee.Reducer.max()).rename("NDWI_MAX");
+var ndwimean = collection.select('NDWI').reduce(ee.Reducer.mean()).rename("NDWI");
+var evimax = collection.select('EVI').reduce(ee.Reducer.max()).rename("EVI_MAX");
+var evimean = collection.select('EVI').reduce(ee.Reducer.mean()).rename("EVI");
+//print(band_median)
+//Add the index statistics to the median bands and clip the dataset with the ROI
+var raster_survey = band_median.addBands(ndvimax).addBands(ndvimean)
+                          .addBands(ndwimax).addBands(ndwimean)
+                          .addBands(savimax).addBands(savimean)
+                          .addBands(evimax).addBands(evimean)
+                          .clip(ant_delim);
+                          
+
+Map.addLayer(raster_survey,nature_color,"Nature Color",1)
+Map.addLayer(raster_survey,saviViz,"Index" + year,1)
+
+///////////////////////// CLASSIFICATION////////////////////////
+var predictionsBands = ["B4","B8","NDVI_MAX","NDWI","EVI_MAX","SAVI"]
+
+
+//// Sampling
+var sampling = fd_ant.merge(fi_ant).merge(sol_ant)
+
+var training = raster_survey.select(predictionsBands).sampleRegions({
+  collection: sampling,
+  properties: ['LULC'],
+  scale: 10})
+
+
+//Training the classifier
+var RF = ee.Classifier.smileRandomForest(75).train({
+  features:training, 
+  classProperty:'LULC', 
+  inputProperties: predictionsBands
+});
+
+var classy_RF = raster_survey.select(predictionsBands).classify(RF);
+Map.addLayer(classy_RF,classifAnt,"Classification "+year)
+
+Export.image.toDrive({
+    image:classy_RF,
+    description:"Antetezana_" + year,
+    folder:"work",
+    scale:10,
+    maxPixels:1e13,
+    crs : "EPSG:4326",
+    fileFormat : "GeoTIFF"
+})
+
+}
+*/
