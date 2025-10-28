@@ -1,0 +1,341 @@
+var survey = antrema_2024
+var geom = survey.geometry()
+var scale=10
+//print("allbands : ",final_bands.bandNames())
+//Map.addLayer(final_bands,{},"ndvi Viz",1)
+
+//3) ----- Define the superpixel seed location spacing, in pixels: (5 - 10 - 15 - 20)
+var size_segmentation = 15
+
+//----- Define the GLCM indices used in input for the PCA
+var glcm_bands= ["gray_asm","gray_contrast","gray_corr","gray_ent","gray_var","gray_idm","gray_savg"]
+
+
+//-----Object-based Approach
+
+// Segmentation using a SNIC approach based on the dataset previosly generated
+var seeds = ee.Algorithms.Image.Segmentation.seedGrid(size_segmentation);
+
+//set the bands names to snic computing
+var snic_bands = [//"NDVI_MAX",
+                  "NDVI",//"NDVI_STD",
+                  "MNDWI",//"NDWI",//"NDWI_STD",
+                  //"SAVI_MAX","SAVI","SAVI_STD",
+                  "B11",
+                  "SAVI_MAX"//,"EVI",//"B8"
+                  ]
+var snic = ee.Algorithms.Image.Segmentation.SNIC({
+  image: survey.select(snic_bands), 
+  compactness:0.1,  
+  connectivity: 8, 
+  neighborhoodSize: 256, 
+  seeds: seeds
+})
+//Create and rescale a grayscale image for GLCM ( Enfin de compte c'est une ponderation de bandes pour avoir une image en fonction de ces bandes)
+//Pour mon experience donc, je vais choisir d'utiliser soir EVI ,soit SAVI , ces indices prenneen ten compte des corrections au niveaux des aerosol
+// atmo et la reflectance du sol
+// the glcmTexture size (in pixel) can be adjusted considering the spatial resolution and the object textural characteristics
+var gray = survey.select('NDVI').rename('gray').unitScale(-1,1).multiply(255).uint8()
+var glcm = gray.glcmTexture({size: 2});
+
+/// Set up the min and max value of the gray band image
+var minMax = gray.reduceRegion({
+  reducer:ee.Reducer.minMax(), 
+  geometry:geom, 
+  scale:10,
+  bestEffort : true
+})
+ var gray_min = minMax.get('gray_min')
+ var gray_max = minMax.get('gray_max')
+//print("La valeur maximale de la bande gray : ",ee.Number(gray_max),"  la valeur doit s'etaler de 0-255")
+//print("La valeur minimale de la bande gray : ",ee.Number(gray_min),"Plus la valeur s'etire plus, l'algorithme glcm est bon")
+
+//----- Define the GLCM indices used in input for the PCA
+var glcm_bands= ["gray_asm","gray_contrast","gray_corr","gray_ent","gray_var","gray_idm","gray_savg"]
+
+//print("Liste de bandes issues des resultats obtenus glcm : ",glcm.bandNames())
+//////////////////////////////////////////PCA METHODS//////////////////////////////////////
+//--- Before the PCA the glcm bands are scaled
+var image = glcm.select(glcm_bands);
+// calculate the min and max value of an image
+var minMax = image.reduceRegion({
+  reducer: ee.Reducer.minMax(),
+  geometry: geom,
+  scale: scale,
+  maxPixels: 1e16,
+  bestEffort:true
+});
+
+
+
+// Normalize the data
+var glcm = ee.ImageCollection.fromImages(
+  image.bandNames().map(function(name){
+    name = ee.String(name);
+    var band = image.select(name);
+    return band.unitScale(ee.Number(minMax.get(name.cat('_min'))), ee.Number(minMax.get(name.cat('_max'))))
+})).toBands().rename(image.bandNames());
+
+//---- Apply the PCA
+// The code relating to the PCA was adapted from the GEE documentation  https://developers.google.com/earth-engine/guides/arrays_eigen_analysis
+
+// Get some information about the input to be used later.
+
+
+var bandNames = glcm.bandNames();
+
+// Mean center the data to enable a faster covariance reducer and an SD stretch of the principal components.
+var meanDict = glcm.reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: geom, 
+    scale: scale,
+    maxPixels: 1e16,
+    bestEffort:true
+});
+
+//,On doit transofmer sous forme une image constante les valeurs moyennées pur chaque bands
+//Donc::::
+var means = ee.Image.constant(meanDict.values(bandNames))
+//soustraction par la moyenne de l 'image constante (band math)
+var centered = glcm.subtract(means);
+
+
+// This helper function returns a list of new band names.
+var getNewBandNames = function(prefix) {
+  var seq = ee.List.sequence(1, bandNames.length());
+  return seq.map(function(b) {
+    return ee.String(prefix).cat(ee.Number(b).int());
+  });
+};
+
+// This function accepts mean centered imagery, a scale and a region in which to perform the analysis. 
+// It returns the Principal Components (PC) in the region as a new image.
+var getPrincipalComponents = function(centered, scale) {
+  // Collapse the bands of the image into a 1D array per pixel.
+  var arrays = centered.toArray();
+  
+  // Compute the covariance of the bands within the region.
+  var covar = arrays.reduceRegion({
+    reducer: ee.Reducer.centeredCovariance(),
+    geometry: geom,
+    scale: scale,
+    bestEffort:true,
+    maxPixels:1e13
+  });
+  
+  // Get the 'array' covariance result and cast to an array.
+  // This represents the band-to-band covariance within the region.
+  var covarArray = ee.Array(covar.get('array'));
+  
+  // Perform an eigen analysis and slice apart the values and vectors.
+  var eigens = covarArray.eigen();
+  
+  // This is a P-length vector of Eigenvalues.
+  var eigenValues = eigens.slice(1, 0, 1);
+  // This is a PxP matrix with eigenvectors in rows.
+  var eigenVectors = eigens.slice(1, 1);
+    
+  // Convert the array image to 2D arrays for matrix computations.
+  var arrayImage = arrays.toArray(1);
+    
+  // Left multiply the image array by the matrix of eigenvectors.
+  var principalComponents = ee.Image(eigenVectors).matrixMultiply(arrayImage);
+    
+  // Turn the square roots of the Eigenvalues into a P-band image.
+  var sdImage = ee.Image(eigenValues.sqrt())
+    .arrayProject([0]).arrayFlatten([getNewBandNames('sd')]);
+  
+  // Turn the PCs into a P-band image, normalized by SD.
+  return principalComponents
+    // Throw out an an unneeded dimension, [[]] -> [].
+    .arrayProject([0])
+    // Make the one band array image a multi-band image, [] -> image.
+    .arrayFlatten([getNewBandNames('pc')])
+    // Normalize the PCs by their SDs.
+    .divide(sdImage);
+};
+
+// Get the PCs at the specified scale and in the specified region
+var pcImage = getPrincipalComponents(centered, scale, geom);
+
+//Select the band "clusters" from the snic output fixed on its scale of 10 meters and add them the PC1 taken from the PCA data.
+// Calculate the mean for each segment with respect to the pixels in that cluster
+var clusters_snic = snic.select("clusters")
+//clusters_snic = clusters_snic.reproject ({crs: clusters_snic.projection (), scale: 10});
+//Map.addLayer(clusters_snic.randomVisualizer(), {}, 'clusters')
+
+var new_feature = clusters_snic.addBands(pcImage.select("pc1"))
+
+var new_feature_mean = new_feature.reduceConnectedComponents({
+  reducer: ee.Reducer.mean(),
+  labelBand: 'clusters'
+})
+
+//////////// Second method is to compare our model with GLCM methout , without it/////
+//SSSSSSOOOOOOOOOOOOOOO
+var reducer_snic = snic.reduceConnectedComponents({
+  reducer:ee.Reducer.mean(),
+  labelBand:"clusters"
+})
+
+
+//Create a dataset with the new band used so far together with the band "clusters" and their new mean parameters
+var final_bands = new_feature_mean.addBands(snic)
+//Map.addLayer(final_bands)
+
+/*
+var reducer_snic_one = final_bands.bandNames().remove('pc1')
+var reducer_snic = final_bands.select(reducer_snic_one)
+/////////////////////////////////////////CLASSIFICATION GEOBIA APPROACH///////////////////////////////////
+*/
+//1)  Sampling data dor the classification
+//Creation of the "newfc" feature collection using the pixels having a feature property called "LULC" 
+var sampling = water.merge(wetlands).merge(tanne).merge(mi).merge(md).merge(fi)
+                    .merge(fd).merge(sa).merge(sol_nu)
+
+//To improve the information using a buffer with a fixed radius  ( radius = 10 m)
+var buffer = function(feature) {
+return feature.buffer(10)};
+var newfc = sampling.map(buffer)
+
+
+// Nommer les nomenclatures
+var names = ["water","wetlands","tanne","mi","md","fi","fd","sa","sol_nu"];
+
+
+///////////////////////////////////////////////
+var bands_noglcm = ['B4_mean', 'EVI_MAX_mean', 'NDVI_MAX_mean', 'NDWI_MAX_mean', 'NDWI_mean', 'SAVI_MAX_mean', 'SAVI_mean']
+var bands_glcm = ['B4_mean', 'EVI_MAX_mean', 'NDVI_MAX_mean', 'NDWI_MAX_mean', 'NDWI_mean', 'SAVI_MAX_mean', 'SAVI_mean',"pc1"]
+///////////////////////////////////////////////////////
+
+
+//Define the training bands removing just the "clusters" bands
+var predictionBands = final_bands.bandNames().remove("clusters")
+//var predictionBandsW = final_bands.select(reducer_snic_one).bandNames().remove('clusters');
+//print("Bands without GLCM PCA",predictionBandsW)
+print("Bands with GLCM PCA",predictionBands)
+
+//Classification using the classifier with the training bands called predictionBands
+// Training with sampling data
+
+
+var bands = final_bands.bandNames()
+var training_GEOBIA = final_bands.select(predictionBands).sampleRegions({
+  collection: newfc,
+  properties: ['LULC'],
+  scale: 10})
+//Export.table.toDrive(training_geobia)
+
+
+/*
+var training_geobiaW = final_bands.select(predictionBandsW).sampleRegions({
+  collection: newfc,
+  properties: ['LULC'],
+  scale: 10})
+*/
+/////////////////////////////Argument: We split the data///////////////////////
+
+// Split the data into training and validation sets
+var split = 0.7; // 80% training, 20% validation
+var ran = training_GEOBIA.randomColumn()
+var training_sample = ran.filter(ee.Filter.lt('random', split));
+var testing_sample= ran.filter(ee.Filter.gte('random', split));
+/*
+var ranW = training_geobiaW.randomColumn()
+var trainpntsW = ranW.filter(ee.Filter.lt('random', split));
+var validationpntsW = ranW.filter(ee.Filter.gte('random', split));
+
+*/
+
+//Training the classifier
+
+var RF = ee.Classifier.smileRandomForest(90).train({
+  features:training_sample, 
+  classProperty:'LULC', 
+  inputProperties: predictionBands
+});
+/*
+var RFW = ee.Classifier.smileRandomForest(70).train({
+  features:trainpntsW, 
+  classProperty:'LULC', 
+  inputProperties: predictionBandsW
+});
+*/
+
+var classy_RF = final_bands.select(predictionBands).classify(RF);
+//var classy_RFW = reducer_snic.select(predictionBandsW).classify(RFW);
+//classy_RF = classy_RF.reproject ({crs: classy_RF.projection (), scale: 10});
+
+var palette = ["#2aaaff","#ff0000","#ffe6c9","#822aff","#ff8ef3","#109c12","#00ff00",
+                "#ffff78","#ffffff"
+              ];
+Map.addLayer(classy_RF, {min: 1, max: 9,palette:palette}, 'WITH GLCM', 1);
+//Map.addLayer(classy_RFW, {min: 1, max: 9, palette: palette}, 'WITHOUT GLCM', 0);
+//Map.addLayer(final_bands,{},"SNIC")
+
+//Map.addLayer(survey,{bands:["B8","B4","B3"],min:0,max:0.512},"Survey composite")
+//Map.addLayer(final_bands,snic_ndvi,"SNIC final")
+//Validation of the object-oriented approach
+
+var classification_validation = testing_sample.classify(RF)
+var testAccuracy = classification_validation.errorMatrix('LULC', 'classification');
+/*
+var classificazioneW = validationpntsW.classify(RFW)
+var testAccuracyW = classificazioneW.errorMatrix('LULC', 'classification');
+*/
+//print('GEOBIA approach_Test confusion matrix: ', testAccuracy);  
+print("les bandes que nous avons utiliés sont : ",predictionBands)
+print('With GLCM approcah : Overall accuracy ', testAccuracy.accuracy());
+//print('Without GLCM approach : Overall accuracy ', testAccuracyW.accuracy());
+print("With GLCM approcah : producer's accuracy : ",testAccuracy.producersAccuracy());
+//print("Without GLCM,producer's accuracy : ",testAccuracyW.producersAccuracy());
+print("With GLCM approcah : consummer's accuracy : ",testAccuracy.consumersAccuracy());
+//print("Without GLCM,consummer's accuracy : ",testAccuracyW.consumersAccuracy());
+print("With GLCM approcah : kappa's accuracy : ",testAccuracy.kappa());
+//print("Without GLCM approach : kappa's accuracy : ",testAccuracyW.kappa());
+
+
+////////////////////////// RESULT CLASSIFICATION USSING ALL BANDS BUT  I HAVE NOT FILTERED ANY///////////////////////////////
+//////SO withglcm overall accuracy is : 0.955
+////// withoutglcm approach : 0.93
+
+// results using the filter bands
+//glcm overal :0.93
+// withou glcm : 0.90
+ /////////////////////////////////////////////////////////////////////
+ 
+// Ici on va analuysezr une methode avec GOEBIA et non GEOBIA,
+// les zones d'apprentissage se fait par polygone mais non pas par segmentation fait pas SNIC
+// Mais on garde neamnois les sampling deja utilisés lors GEOBIA, pour avoir une comparaison
+//homogène
+//Les optimisation des paramètres ont éét déjà fait via python (bandes  et n_tree)
+/*
+///////////////////////SPLIT THE SCREENNN /////////////////////////
+/// Split the image
+// Create two map layers for the split map
+var leftMap = ui.Map();
+var rightMap = ui.Map();
+
+// Add the first image to the left map
+leftMap.addLayer(classy_RF,viz);
+var landLabel = ui.Label('Random forest with glcm')
+landLabel.style().set('position',"bottom-left")
+leftMap.add(landLabel)
+// Add the second image to the right map
+rightMap.addLayer(classy_RFW,viz);
+var S2label = ui.Label('Random forest without glcm')
+S2label.style().set('position','bottom-right')
+rightMap.add(S2label)
+
+// Create a split panel to display the two maps side by side
+var splitPanel = ui.SplitPanel({
+  firstPanel: leftMap,
+  secondPanel: rightMap,
+  orientation: 'horizontal', // 'horizontal' or 'vertical'
+  wipe: true// Enable the swipe tool
+});
+ui.root.clear()
+
+ui.root.add(splitPanel)
+var linkPanel = ui.Map.Linker([leftMap,rightMap])
+*/
